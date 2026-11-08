@@ -15,6 +15,10 @@ The system prompts are in `prompts.js`.
 
 Keys are stored in the browser's local storage on that device.
 
+## Bold and italics
+
+When text is pasted from a document or web page (Google Docs, Word, a browser), bold and italics are kept as Markdown marks (`**bold**`, `*italics*`) in the text field. Her messages show these two kinds of formatting and nothing else, so a line of dialogue starting with "- " stays as it is. The model is told that the marks are her formatting, and the translator keeps them in the translation.
+
 ## Story notes
 
 *Notatki* opens her story notes: free text with titles, characters, names and places she has decided. They are added to the writing helper's instructions in every *Pomysły* conversation, so it knows her stories across conversations. *Uzupełnij z tej rozmowy* asks the model for a draft of new notes from the open conversation and adds it to the end of the text, for her to check and edit before saving. The notes are synced with the conversations.

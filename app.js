@@ -157,6 +157,75 @@ function setMarkdown(el, text) {
     .forEach(block => { block.dir = 'auto'; });
 }
 
+// ---------------------------------------------------------------------------
+// Bold and italics in her own text
+// ---------------------------------------------------------------------------
+
+// Her messages keep bold and italics as Markdown marks (**bold**, *italics*).
+// Only those two are shown as formatting; everything else stays plain text, so a
+// line of dialogue starting with "- " does not turn into a list.
+function formatUserText(text) {
+  const escaped = text.replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+  return escaped
+    .replace(/\*\*\*(?=\S)([\s\S]*?\S)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*\\])\*(?=\S)([^*\n]*?\S)\*(?!\*)/g, '$1<em>$2</em>')
+    .replace(/\\\*/g, '*');
+}
+
+// When she pastes text copied from a document (Google Docs, Word, a web page),
+// bold and italics are kept as Markdown marks. Plain text pastes as usual.
+function pasteWithFormatting(event) {
+  const html = event.clipboardData?.getData('text/html');
+  if (!html) return;
+  const markdown = htmlToMarkdown(html);
+  if (!markdown.trim()) return;
+  event.preventDefault();
+  const field = event.target;
+  field.setRangeText(markdown, field.selectionStart, field.selectionEnd, 'end');
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function htmlToMarkdown(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const BLOCKS = new Set(['P', 'DIV', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'TR']);
+
+  function isBold(el) {
+    const weight = el.style?.fontWeight;
+    if (weight) return weight === 'bold' || weight === 'bolder' || Number(weight) >= 600;
+    return ['B', 'STRONG'].includes(el.tagName);
+  }
+  function isItalic(el) {
+    const style = el.style?.fontStyle;
+    if (style) return style === 'italic' || style === 'oblique';
+    return ['I', 'EM'].includes(el.tagName);
+  }
+  // Puts marks around the text, keeping spaces outside them ("**word** ", not "**word **").
+  function wrap(text, mark) {
+    const match = text.match(/^(\s*)([\s\S]*?)(\s*)$/);
+    return match[2] ? match[1] + mark + match[2] + mark + match[3] : text;
+  }
+  function walk(node) {
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent.replace(/\*/g, '\\*');
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+    if (['SCRIPT', 'STYLE', 'TITLE', 'META'].includes(node.tagName)) return '';
+    if (node.tagName === 'BR') return '\n';
+    let text = Array.from(node.childNodes).map(walk).join('');
+    // Marks are not repeated inside text that is already marked, and do not cross line breaks.
+    const hasMark = (line, m) => m === '**' ? line.includes('**') : /(^|[^*])\*(?!\*)/.test(line.replace(/\\\*/g, ''));
+    const mark = (t, m) => t.split('\n').map(line => hasMark(line, m) ? line : wrap(line, m)).join('\n');
+    if (isBold(node)) text = mark(text, '**');
+    if (isItalic(node)) text = mark(text, '*');
+    if (BLOCKS.has(node.tagName)) text = '\n' + text + '\n';
+    return text;
+  }
+  return walk(doc.body)
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function formatDate(ms) {
   return new Date(ms).toLocaleDateString('pl-PL', { day: 'numeric', month: 'short' });
 }
@@ -190,7 +259,7 @@ function messageElement(msg) {
   div.className = `msg ${msg.role}`;
   div.dir = 'auto';
   if (msg.role === 'user') {
-    div.textContent = msg.content;
+    div.innerHTML = formatUserText(msg.content);
   } else {
     const body = document.createElement('div');
     body.className = 'msg-body';
@@ -752,6 +821,8 @@ $('#composer').onsubmit = e => {
   $('#input').value = '';
   send(text);
 };
+
+$('#input').addEventListener('paste', pasteWithFormatting);
 
 $('#input').addEventListener('keydown', e => {
   // Ctrl+Enter (Cmd+Enter on Mac) sends; plain Enter adds a new line.
