@@ -1,7 +1,7 @@
 // Service worker: makes the page installable and lets it open without a network.
 // Own files are fetched from the network first, falling back to the cache.
 // Requests to other origins (Mistral, GitHub, CDN) are not touched.
-const CACHE = 'fabula-v4';
+const CACHE = 'fabula-v5';
 const FILES = ['./', 'index.html', 'app.js', 'prompts.js', 'style.css', 'manifest.webmanifest', 'icons/icon-192.png'];
 
 self.addEventListener('install', event => {

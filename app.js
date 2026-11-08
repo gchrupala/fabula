@@ -24,6 +24,11 @@ const FALLBACK_MODELS = ['mistral-small-latest', 'open-mistral-nemo', 'ministral
 // at most this many and at most this many characters (the latest message is always sent).
 const HISTORY_MAX_MESSAGES = 40;
 const HISTORY_MAX_CHARS = 40000;
+// Earlier replies longer than this are sent shortened, so the model does not
+// copy the length of its own earlier long replies.
+const HISTORY_MAX_REPLY_CHARS = 1500;
+// Upper limit for one reply (about 900 words), so a reply cannot run on.
+const MAX_REPLY_TOKENS = 1200;
 
 const LANGS = {
   pl: 'polski',
@@ -310,6 +315,10 @@ async function respond(conv) {
           throw new Error(event.error?.message || event.message || 'błąd serwera Mistral');
         }
         reply.content += deltaText(event.choices?.[0]?.delta?.content);
+        // The reply hit the length limit: say so instead of ending mid-sentence silently.
+        if (event.choices?.[0]?.finish_reason === 'length') {
+          reply.content += '\n\n(Odpowiedź była za długa i została ucięta. Poproś o dalszy ciąg albo o krótszą wersję.)';
+        }
       }
       setMarkdown(body, reply.content);
       messages.scrollTop = messages.scrollHeight;
@@ -383,6 +392,11 @@ function recentMessages(messages, maxMessages = HISTORY_MAX_MESSAGES, maxChars =
   return { messages: kept, trimmed: kept.length < messages.length };
 }
 
+function shortenReply(msg) {
+  if (msg.role !== 'assistant' || msg.content.length <= HISTORY_MAX_REPLY_CHARS) return msg;
+  return { ...msg, content: msg.content.slice(0, HISTORY_MAX_REPLY_CHARS) + ' […]' };
+}
+
 function chatRequest(conv, model, signal) {
   const history = recentMessages(conv.messages);
   return fetch(`${MISTRAL_URL}/chat/completions`, {
@@ -395,9 +409,10 @@ function chatRequest(conv, model, signal) {
       model,
       stream: true,
       temperature: TEMPERATURE[conv.mode],
+      max_tokens: MAX_REPLY_TOKENS,
       messages: [
         { role: 'system', content: systemPrompt(conv, { notes: state.notes.text, trimmed: history.trimmed }) },
-        ...history.messages.map(m => ({ role: m.role, content: apiContent(conv, m) })),
+        ...history.messages.map((m, i, all) => ({ role: m.role, content: apiContent(conv, shortenReply(m), i === all.length - 1) })),
       ],
     }),
     signal,
