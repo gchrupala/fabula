@@ -204,6 +204,13 @@ ${(existingNotes || '').trim() || '(none yet)'}
 // In translation conversations each message from the author is sent framed as text
 // to translate, so the model does not answer it as if it were a chat message.
 // The stored message stays as she wrote it.
+// One part of a long text that is translated in parts. Models tend to stop early
+// on very long texts, so the app sends them part by part.
+function translatePartContent(conv, text, index, count) {
+  const lang = PROMPT_LANGS[conv.targetLang] || conv.targetLang;
+  return `Translate into ${lang}. This is part ${index + 1} of ${count} of a longer text. Translate this whole part, from its first word to its last, and nothing else: no introduction, no notes, no comments. Keep the line breaks.\n\n${text}`;
+}
+
 // A short reminder added to her latest message in writing conversations (she does
 // not see it). In long conversations the model otherwise copies the length and
 // format of its own earlier replies.

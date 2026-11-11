@@ -27,8 +27,18 @@ const HISTORY_MAX_CHARS = 40000;
 // Earlier replies longer than this are sent shortened, so the model does not
 // copy the length of its own earlier long replies.
 const HISTORY_MAX_REPLY_CHARS = 1500;
-// Upper limit for one reply (about 900 words), so a reply cannot run on.
+// Upper limit for one writing-helper reply (about 900 words), so a reply cannot run on.
+// Translations have no such limit: they must be as long as her text.
 const MAX_REPLY_TOKENS = 1200;
+// Translations keep more of the conversation, unshortened, so follow-up requests
+// about a long chapter still see it.
+const TRANSLATE_HISTORY_MAX_CHARS = 150000;
+// A translation that still stops because of length is continued automatically, at most this many times.
+const MAX_CONTINUATIONS = 5;
+// Texts to translate that are longer than this are translated in parts of about PART_WORDS words.
+const SPLIT_ABOVE_WORDS = 900;
+const PART_WORDS = 700;
+const CONTINUE_REQUEST = 'Continue the translation exactly where you stopped. Do not repeat anything you already wrote and do not add any introduction or notes before it.';
 
 const LANGS = {
   pl: 'polski',
@@ -365,32 +375,22 @@ async function respond(conv) {
   let error = null;
 
   try {
-    const res = await requestChat(conv, controller.signal, messages);
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop();
-      for (const line of lines) {
-        const data = line.replace(/^data: ?/, '').trim();
-        if (!line.startsWith('data:') || !data || data === '[DONE]') continue;
-        const event = JSON.parse(data);
-        if (event.error || event.object === 'error') {
-          throw new Error(event.error?.message || event.message || 'błąd serwera Mistral');
-        }
-        reply.content += deltaText(event.choices?.[0]?.delta?.content);
-        // The reply hit the length limit: say so instead of ending mid-sentence silently.
-        if (event.choices?.[0]?.finish_reason === 'length') {
-          reply.content += '\n\n(Odpowiedź była za długa i została ucięta. Poproś o dalszy ciąg albo o krótszą wersję.)';
-        }
+    const last = conv.messages.at(-1);
+    let finish;
+    if (conv.mode === 'translate' && last?.role === 'user' && wordCount(last.content) > SPLIT_ABOVE_WORDS) {
+      finish = await translateInParts(conv, last.content, reply, body, messages);
+    } else {
+      finish = await readStream(await requestChat(conv, controller.signal, messages), reply, body, messages);
+      // A translation that stopped because of length is continued where it stopped.
+      for (let n = 0; conv.mode === 'translate' && finish === 'length' && n < MAX_CONTINUATIONS; n++) {
+        if (!/\s$/.test(reply.content)) reply.content += ' ';
+        finish = await readStream(await requestChat(conv, controller.signal, messages, reply.content), reply, body, messages);
       }
+    }
+    // Still too long: say so instead of ending mid-sentence silently.
+    if (finish === 'length') {
+      reply.content += '\n\n(Odpowiedź była za długa i została ucięta. Poproś o dalszy ciąg albo o krótszą wersję.)';
       setMarkdown(body, reply.content);
-      messages.scrollTop = messages.scrollHeight;
     }
   } catch (err) {
     if (err.name === 'AbortError') aborted = true;
@@ -461,13 +461,116 @@ function recentMessages(messages, maxMessages = HISTORY_MAX_MESSAGES, maxChars =
   return { messages: kept, trimmed: kept.length < messages.length };
 }
 
+function wordCount(text) {
+  return text.split(/\s+/).filter(Boolean).length;
+}
+
+// Splits a long text into parts of about `maxWords` words, at line breaks
+// (or, inside a very long paragraph, at the end of a sentence).
+function splitIntoParts(text, maxWords = PART_WORDS) {
+  const pieces = [];
+  for (const line of text.split('\n')) {
+    if (wordCount(line) <= maxWords) { pieces.push(line); continue; }
+    let current = '';
+    for (const sentence of line.split(/(?<=[.!?…])\s+/)) {
+      if (current && wordCount(current + ' ' + sentence) > maxWords) { pieces.push(current); current = sentence; }
+      else current = current ? current + ' ' + sentence : sentence;
+    }
+    if (current) pieces.push(current);
+  }
+  const parts = [];
+  let current = [];
+  for (const piece of pieces) {
+    if (current.length && wordCount(current.join('\n') + '\n' + piece) > maxWords) {
+      parts.push(current.join('\n'));
+      current = [];
+    }
+    current.push(piece);
+  }
+  if (current.join('').trim()) parts.push(current.join('\n'));
+  return parts;
+}
+
+// Translates a long text part by part into `reply`. Each part is sent with the
+// previous part and its translation, so names and wording stay consistent.
+async function translateInParts(conv, text, reply, body, container) {
+  const parts = splitIntoParts(text);
+  const system = { role: 'system', content: systemPrompt(conv) };
+  const done = [];
+  let finish = 'stop';
+  for (let i = 0; i < parts.length; i++) {
+    const messages = [system];
+    if (i > 0) {
+      messages.push(
+        { role: 'user', content: translatePartContent(conv, parts[i - 1], i - 1, parts.length) },
+        { role: 'assistant', content: done[i - 1] },
+      );
+    }
+    messages.push({ role: 'user', content: translatePartContent(conv, parts[i], i, parts.length) });
+    if (i > 0) reply.content += '\n\n';
+    const start = reply.content.length;
+    finish = await readStream(await requestChat(conv, controller.signal, container, '', messages), reply, body, container);
+    for (let n = 0; finish === 'length' && n < MAX_CONTINUATIONS; n++) {
+      if (!/\s$/.test(reply.content)) reply.content += ' ';
+      const partial = reply.content.slice(start);
+      finish = await readStream(await requestChat(conv, controller.signal, container, partial, messages), reply, body, container);
+    }
+    done.push(reply.content.slice(start).trim());
+  }
+  return finish;
+}
+
+// Reads a streamed reply into `reply`, showing it as it arrives. Returns why the
+// model stopped ('stop', 'length', ...).
+async function readStream(res, reply, body, messages) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finish = null;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop();
+    for (const line of lines) {
+      const data = line.replace(/^data: ?/, '').trim();
+      if (!line.startsWith('data:') || !data || data === '[DONE]') continue;
+      const event = JSON.parse(data);
+      if (event.error || event.object === 'error') {
+        throw new Error(event.error?.message || event.message || 'błąd serwera Mistral');
+      }
+      reply.content += deltaText(event.choices?.[0]?.delta?.content);
+      finish = event.choices?.[0]?.finish_reason || finish;
+    }
+    setMarkdown(body, reply.content);
+    messages.scrollTop = messages.scrollHeight;
+  }
+  return finish;
+}
+
 function shortenReply(msg) {
   if (msg.role !== 'assistant' || msg.content.length <= HISTORY_MAX_REPLY_CHARS) return msg;
   return { ...msg, content: msg.content.slice(0, HISTORY_MAX_REPLY_CHARS) + ' […]' };
 }
 
-function chatRequest(conv, model, signal) {
-  const history = recentMessages(conv.messages);
+// `partial` is the part of a translation already received; the model is asked to continue it.
+// `override` replaces the conversation as the messages sent (used for translating in parts).
+function chatRequest(conv, model, signal, partial = '', override = null) {
+  const translate = conv.mode === 'translate';
+  const history = translate
+    ? recentMessages(conv.messages, HISTORY_MAX_MESSAGES, TRANSLATE_HISTORY_MAX_CHARS)
+    : recentMessages(conv.messages);
+  const messages = override ? [...override] : [
+    { role: 'system', content: systemPrompt(conv, { notes: state.notes.text, trimmed: history.trimmed }) },
+    ...history.messages.map((m, i, all) => ({
+      role: m.role,
+      content: apiContent(conv, translate ? m : shortenReply(m), i === all.length - 1),
+    })),
+  ];
+  if (partial) {
+    messages.push({ role: 'assistant', content: partial }, { role: 'user', content: CONTINUE_REQUEST });
+  }
   return fetch(`${MISTRAL_URL}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -478,11 +581,8 @@ function chatRequest(conv, model, signal) {
       model,
       stream: true,
       temperature: TEMPERATURE[conv.mode],
-      max_tokens: MAX_REPLY_TOKENS,
-      messages: [
-        { role: 'system', content: systemPrompt(conv, { notes: state.notes.text, trimmed: history.trimmed }) },
-        ...history.messages.map((m, i, all) => ({ role: m.role, content: apiContent(conv, shortenReply(m), i === all.length - 1) })),
-      ],
+      ...(translate ? {} : { max_tokens: MAX_REPLY_TOKENS }),
+      messages,
     }),
     signal,
   });
@@ -490,11 +590,11 @@ function chatRequest(conv, model, signal) {
 
 // Sends the request with the chosen model. If the Mistral plan does not include
 // that model, tries the fallback models and remembers the first one that works.
-async function requestChat(conv, signal, container) {
+async function requestChat(conv, signal, container, partial = '', override = null) {
   const chosen = settings.model || DEFAULTS.model;
   const candidates = [chosen, ...FALLBACK_MODELS.filter(m => m !== chosen)];
   for (const model of candidates) {
-    const res = await chatRequest(conv, model, signal);
+    const res = await chatRequest(conv, model, signal, partial, override);
     if (res.ok) {
       if (model !== chosen) {
         settings.model = model;

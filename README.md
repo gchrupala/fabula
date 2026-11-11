@@ -23,6 +23,10 @@ When text is pasted from a document or web page (Google Docs, Word, a browser), 
 
 *Notatki* opens her story notes: free text with titles, characters, names and places she has decided. They are added to the writing helper's instructions in every *Pomysły* conversation, so it knows her stories across conversations. *Uzupełnij z tej rozmowy* asks the model for a draft of new notes from the open conversation and adds it to the end of the text, for her to check and edit before saving. The notes are synced with the conversations.
 
+## Long translations
+
+Models tend to stop early on long texts, or to skip the second half. A text to translate of more than 900 words is therefore split into parts of about 700 words at line breaks, and the parts are translated one after another, each with the previous part and its translation as context. Translations have no length limit, and a part that still stops because of length is continued automatically. Writing-helper replies are limited to 1200 tokens.
+
 ## Long conversations
 
 Only the most recent part of a conversation is sent to the model: at most 40 messages and 40,000 characters (the latest message is always sent). The model is told when earlier messages are hidden.
