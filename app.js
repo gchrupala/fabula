@@ -331,7 +331,11 @@ function renderChat() {
   $('#chat-title').textContent = conv.title || MODES[conv.mode].label;
   $('#input').placeholder = MODES[conv.mode].placeholder;
   if (conv.mode === 'translate') $('#target-lang').value = conv.targetLang;
-  for (const msg of conv.messages) messages.append(messageElement(msg));
+  // Saved notices (errors, model changes) are shown where they happened.
+  const notices = conv.notices || [];
+  const noticesAfter = n => notices.filter(x => x.after === n).forEach(x => messages.append(noticeElement(x)));
+  noticesAfter(0);
+  conv.messages.forEach((msg, i) => { messages.append(messageElement(msg)); noticesAfter(i + 1); });
   addRetryButton();
   messages.scrollTop = messages.scrollHeight;
 }
@@ -406,25 +410,26 @@ async function respond(conv) {
     }
   } catch (err) {
     if (err.name === 'AbortError') aborted = true;
-    else error = err.message;
+    // A failed request (no internet, connection dropped) only says "Failed to fetch".
+    else error = err.name === 'TypeError' ? `brak połączenia z internetem albo z serwerem (${err.message})` : err.message;
   } finally {
     controller = null;
     setBusy(false);
   }
 
-  // Shown only after `controller` is cleared, so the retry button can appear.
-  if (error) showError(error);
-  else if (!reply.content && !aborted) showError('model nie zwrócił odpowiedzi. Spróbuj jeszcze raz.');
-
   conv = state.conversations[conv.id];
   if (reply.content && conv?.messages) {
     conv.messages.push(reply);
     touch(conv);
-    renderList();
     scheduleSync();
-  } else {
-    el.remove();
   }
+  // Saved after the reply (if part of it arrived), and shown only after `controller`
+  // is cleared, so the retry button can appear.
+  if (error) logNotice(conv, 'error', error);
+  else if (!reply.content && !aborted) logNotice(conv, 'error', 'model nie zwrócił odpowiedzi. Spróbuj jeszcze raz.');
+  renderList();
+  if (state.activeId === conv?.id) renderChat();
+  else el.remove();
 }
 
 // Streamed content is usually a string, but some models send a list of parts
@@ -437,12 +442,22 @@ function deltaText(content) {
   return '';
 }
 
-function showError(message) {
+function noticeElement(notice) {
   const e = document.createElement('div');
-  e.className = 'msg error';
-  e.textContent = `Błąd: ${message}`;
-  $('#messages').append(e);
-  addRetryButton();
+  e.className = notice.kind === 'error' ? 'msg error' : 'msg info';
+  const time = new Date(notice.at).toLocaleString('pl-PL', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  e.textContent = notice.kind === 'error' ? `Błąd (${time}): ${notice.text}` : notice.text;
+  return e;
+}
+
+// Saves a notice in the conversation, after its current last message, so errors
+// are kept in the synced conversation log. Notices are never sent to the model.
+function logNotice(conv, kind, text) {
+  const c = conv && state.conversations[conv.id];
+  if (!c?.messages) return;
+  (c.notices ||= []).push({ at: Date.now(), kind, text, after: c.messages.length, model: settings.model });
+  touch(c);
+  scheduleSync();
 }
 
 // Offers to ask again when the last message in the conversation has no answer.
@@ -612,10 +627,9 @@ async function requestChat(conv, signal, container, partial = '', override = nul
       if (model !== chosen) {
         settings.model = model;
         saveSettings();
-        const note = document.createElement('div');
-        note.className = 'msg info';
-        note.textContent = `Model „${chosen}” nie jest dostępny w tym planie Mistral, więc od teraz używam „${model}”. Można to zmienić w ustawieniach.`;
-        container.insertBefore(note, container.lastElementChild);
+        const text = `Model „${chosen}” nie jest dostępny w tym planie Mistral, więc od teraz używam „${model}”. Można to zmienić w ustawieniach.`;
+        logNotice(conv, 'info', text);
+        container.insertBefore(noticeElement({ kind: 'info', text, at: Date.now() }), container.lastElementChild);
       }
       return res;
     }
