@@ -11,7 +11,10 @@ const MISTRAL_URL = 'https://api.mistral.ai/v1';
 const DEFAULTS = {
   user: '',
   mistralKey: '',
-  model: 'mistral-large-latest',
+  // A fixed version (Mistral Large 3, open-weight, no reasoning step). "mistral-large-latest"
+  // moved to Mistral Large 4 in November 2026, which always reasons first and used up the
+  // reply limit on long chapters.
+  model: 'mistral-large-2512',
   githubToken: '',
   repo: 'gchrupala/app-data',
 };
@@ -76,6 +79,11 @@ const settings = { ...DEFAULTS, ...load(`${APP}-settings`, {}) };
 if (!settings.largeDefault) {
   if (settings.model === 'mistral-small-latest') settings.model = DEFAULTS.model;
   settings.largeDefault = true;
+  store(`${APP}-settings`, settings);
+}
+if (!settings.pinnedLarge3) {
+  if (settings.model === 'mistral-large-latest') settings.model = DEFAULTS.model;
+  settings.pinnedLarge3 = true;
   store(`${APP}-settings`, settings);
 }
 const state = load(`${APP}-state`, { conversations: {}, activeId: null });
@@ -381,6 +389,10 @@ async function respond(conv) {
       finish = await translateInParts(conv, last.content, reply, body, messages);
     } else {
       finish = await readStream(await requestChat(conv, controller.signal, messages), reply, body, messages);
+      // A reasoning model can spend the whole limit on thinking and show nothing: ask again without the limit.
+      if (finish === 'length' && !reply.content.trim()) {
+        finish = await readStream(await requestChat(conv, controller.signal, messages, '', null, true), reply, body, messages);
+      }
       // A translation that stopped because of length is continued where it stopped.
       for (let n = 0; conv.mode === 'translate' && finish === 'length' && n < MAX_CONTINUATIONS; n++) {
         if (!/\s$/.test(reply.content)) reply.content += ' ';
@@ -556,7 +568,8 @@ function shortenReply(msg) {
 
 // `partial` is the part of a translation already received; the model is asked to continue it.
 // `override` replaces the conversation as the messages sent (used for translating in parts).
-function chatRequest(conv, model, signal, partial = '', override = null) {
+// `unlimited` drops the reply limit (used when a reasoning model spent it all on thinking).
+function chatRequest(conv, model, signal, partial = '', override = null, unlimited = false) {
   const translate = conv.mode === 'translate';
   const history = translate
     ? recentMessages(conv.messages, HISTORY_MAX_MESSAGES, TRANSLATE_HISTORY_MAX_CHARS)
@@ -581,7 +594,7 @@ function chatRequest(conv, model, signal, partial = '', override = null) {
       model,
       stream: true,
       temperature: TEMPERATURE[conv.mode],
-      ...(translate ? {} : { max_tokens: MAX_REPLY_TOKENS }),
+      ...(translate || unlimited ? {} : { max_tokens: MAX_REPLY_TOKENS }),
       messages,
     }),
     signal,
@@ -590,11 +603,11 @@ function chatRequest(conv, model, signal, partial = '', override = null) {
 
 // Sends the request with the chosen model. If the Mistral plan does not include
 // that model, tries the fallback models and remembers the first one that works.
-async function requestChat(conv, signal, container, partial = '', override = null) {
+async function requestChat(conv, signal, container, partial = '', override = null, unlimited = false) {
   const chosen = settings.model || DEFAULTS.model;
   const candidates = [chosen, ...FALLBACK_MODELS.filter(m => m !== chosen)];
   for (const model of candidates) {
-    const res = await chatRequest(conv, model, signal, partial, override);
+    const res = await chatRequest(conv, model, signal, partial, override, unlimited);
     if (res.ok) {
       if (model !== chosen) {
         settings.model = model;

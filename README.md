@@ -45,4 +45,4 @@ The page also works when `index.html` is opened directly from disk, but cannot b
 
 ## Model
 
-The default model is `mistral-large-latest`. Devices that had the earlier default, `mistral-small-latest`, are switched to it once. The model can be changed in the settings; the field suggests the models the key can see. If the Mistral plan does not include the chosen model (error 403), the app tries `mistral-small-latest`, `open-mistral-nemo` and `ministral-8b-latest` in that order and keeps the first one that works.
+The default model is `mistral-large-2512` (Mistral Large 3), a fixed version: `mistral-large-latest` moved to Mistral Large 4 in November 2026, which always reasons before answering. Devices that had the earlier default, `mistral-small-latest`, are switched to it once. The model can be changed in the settings; the field suggests the models the key can see. If the Mistral plan does not include the chosen model (error 403), the app tries `mistral-small-latest`, `open-mistral-nemo` and `ministral-8b-latest` in that order and keeps the first one that works.
